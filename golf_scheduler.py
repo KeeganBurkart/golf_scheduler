@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Streamlit Web App for Golf Group Scheduling with Player Management.
-Improved Social‑Golfer solver: exact backtracking per week (pair‑wise uniqueness).
+Improved scheduler: MRV‑based per‑week backtracking with schedule‑level retries.
 """
 
 import streamlit as st
@@ -15,151 +15,82 @@ from pathlib import Path
 # Configuration
 # ==============================================================================
 GROUP_SIZE = 4
+MAX_SCHEDULE_ATTEMPTS = 10  # number of full-schedule retries before giving up
 
 # ==============================================================================
-# Core Scheduling Logic – pair‑wise backtracking
+# Core Scheduling Logic
 # ==============================================================================
 
 def pairs_of(group):
-    """Return frozensets for all 2‑player combos in *group*."""
+    """Return frozensets for all 2‑player combos in a group."""
     return [frozenset(p) for p in itertools.combinations(group, 2)]
 
 
-def build_week(remaining, group_size, past_pairs, groups_acc):
-    """Recursive helper – builds one week's groups or returns None (fail)."""
+def build_week_mrv(remaining, group_size, past_pairs, groups_acc):
+    """Recursive backtracking for one week using MRV heuristic."""
     if not remaining:
-        return groups_acc  # success
+        return groups_acc
 
-    first = remaining[0]
-    # Choose partners for *first*
-    for partners in itertools.combinations(remaining[1:], group_size - 1):
+    # MRV: pick the player with fewest available partners
+    def partner_degree(p):
+        return sum(1 for q in remaining if q != p and frozenset((p, q)) not in past_pairs)
+
+    first = min(remaining, key=partner_degree)
+
+    # Generate all partner combinations for 'first'
+    candidates = list(itertools.combinations([q for q in remaining if q != first], group_size - 1))
+    random.shuffle(candidates)
+
+    for partners in candidates:
         group = (first, *partners)
-        # Check pairwise uniqueness
-        if any(p in past_pairs for p in pairs_of(group)):
+        gpairs = pairs_of(group)
+        # Skip if any pair already used
+        if any(p in past_pairs for p in gpairs):
             continue
 
         # Commit this group
-        new_pairs = pairs_of(group)
-        past_pairs.update(new_pairs)
-        next_remaining = [p for p in remaining if p not in group]
+        past_pairs.update(gpairs)
+        next_rem = [p for p in remaining if p not in group]
 
-        result = build_week(next_remaining, group_size, past_pairs, groups_acc + [tuple(sorted(group))])
+        result = build_week_mrv(next_rem, group_size, past_pairs, groups_acc + [tuple(sorted(group))])
         if result is not None:
-            return result  # found a full week
+            return result
 
         # Backtrack
-        for p in new_pairs:
+        for p in gpairs:
             past_pairs.remove(p)
 
-    return None  # dead end
-
-
-def generate_weekly_groups_bt(player_list, past_pairs, group_size):
-    """Generate one week's schedule using recursive backtracking (exact)."""
-    players = sorted(player_list)
-    random.shuffle(players)  # randomise starting order for variety
-    return build_week(players, group_size, past_pairs, [])
+    return None
 
 
 def create_schedule(golfer_list, num_weeks, group_size):
-    """Create full schedule. Returns (schedule, message)."""
+    """Attempt to build a full schedule by retrying per-week MRV solver."""
     if not golfer_list:
         return None, "Error: Golfer list is empty."
 
-    if len(golfer_list) % group_size != 0:
-        return None, (
-            f"Error: Number of included players ("f"{len(golfer_list)}) must be divisible by group size ("f"{group_size}).")
+    n = len(golfer_list)
+    if n % group_size != 0:
+        return None, f"Error: Number of players ({n}) must be divisible by {group_size}."
 
-    theoretical_max = (len(golfer_list) - 1) // (group_size - 1)
-    if num_weeks > theoretical_max:
-        return None, (
-            f"Impossible: With {len(golfer_list)} players you can have at most {theoretical_max} unique weeks.")
+    # Max unique weeks = (n-1) / (group_size - 1)
+    max_weeks = (n - 1) // (group_size - 1)
+    if num_weeks > max_weeks:
+        return None, f"Impossible: max unique weeks is {max_weeks}."
 
-    past_pairs = set()
-    schedule = []
+    for attempt in range(1, MAX_SCHEDULE_ATTEMPTS + 1):
+        past_pairs = set()
+        schedule = []
+        success = True
+        for wk in range(1, num_weeks + 1):
+            weekly = build_week_mrv(sorted(golfer_list), group_size, past_pairs, [])
+            if weekly is None:
+                success = False
+                break
+            schedule.append(weekly)
+        if success:
+            return schedule, f"Successfully generated schedule in {attempt} attempt(s)!"
 
-    for week in range(1, num_weeks + 1):
-        week_groups = generate_weekly_groups_bt(golfer_list, past_pairs, group_size)
-        if week_groups is None:
-            return schedule, (
-                f"Error: Could not find a valid arrangement for Week {week}. "
-                "Try reducing weeks or shuffling players.")
-        schedule.append(week_groups)
-
-    return schedule, f"Successfully generated schedule for all {num_weeks} weeks!"
-
-# -----------------------------------------------------------------------------
-# Core Scheduling Logic - exact global backtracking across weeks
-# -----------------------------------------------------------------------------
-
-def pairs_of(group):
-    """Return frozensets for all 2-player combos in group."""
-    return [frozenset(p) for p in itertools.combinations(group, 2)]
-
-
-def generate_week_candidates(players, group_size, past_pairs):
-    """Yields all valid groupings for one week given past_pairs."""
-    def helper(remaining, used_pairs, built):
-        if not remaining:
-            yield built
-            return
-        first = remaining[0]
-        # Try every combination of partners for 'first'
-        for partners in itertools.combinations(remaining[1:], group_size - 1):
-            group = (first, *partners)
-            group_pairs = pairs_of(group)
-            # Skip if any pair is used
-            if any(p in past_pairs or p in used_pairs for p in group_pairs):
-                continue
-            # Mark these pairs as used locally
-            new_used = used_pairs.union(group_pairs)
-            next_rem = [p for p in remaining if p not in group]
-            yield from helper(next_rem, new_used, built + [tuple(sorted(group))])
-    yield from helper(sorted(players), set(), [])
-
-
-def schedule_weeks_bt(week_idx, num_weeks, players, group_size, past_pairs):
-    """Recursive backtracking over weeks."""
-    if week_idx > num_weeks:
-        return []  # all weeks assigned
-    # Try each possible grouping for this week
-    for week_groups in generate_week_candidates(players, group_size, past_pairs):
-        # Collect new pairs
-        new_pairs = set(p for g in week_groups for p in pairs_of(g))
-        past_pairs.update(new_pairs)
-        # Recurse for next week
-        rest = schedule_weeks_bt(week_idx + 1, num_weeks, players, group_size, past_pairs)
-        if rest is not None:
-            return [week_groups] + rest
-        # Backtrack
-        past_pairs.difference_update(new_pairs)
-    return None  # no valid arrangement found here
-
-
-def create_schedule(golfer_list, num_weeks, group_size):
-    """Create full schedule. Returns (schedule, message)."""
-    if not golfer_list:
-        return None, "Error: Golfer list is empty."
-    if len(golfer_list) % group_size != 0:
-        return None, (
-            f"Error: Number of included players ({len(golfer_list)}) must be divisible by group size ({group_size})."
-        )
-    # Theoretical max weeks: each player pairs with group_size-1 new people per week
-    theoretical_max = (len(golfer_list) - 1) // (group_size - 1)
-    if num_weeks > theoretical_max:
-        return None, (
-            f"Impossible: With {len(golfer_list)} players, max unique weeks is {theoretical_max}."
-        )
-
-    past_pairs = set()
-    # Recurse to build all weeks
-    schedule = schedule_weeks_bt(1, num_weeks, golfer_list, group_size, past_pairs)
-    if schedule is None:
-        return None, (
-            f"Error: Could not find a valid schedule for {num_weeks} weeks. "
-            "Try reducing the number of weeks."
-        )
-    return schedule, f"Successfully generated schedule for all {num_weeks} weeks!"
+    return None, f"Error: Could not generate a valid schedule after {MAX_SCHEDULE_ATTEMPTS} attempts."
 
 # ==============================================================================
 # Streamlit Specific Helper Functions (Defined before UI calls them)
