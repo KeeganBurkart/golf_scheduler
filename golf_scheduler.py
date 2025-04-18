@@ -17,7 +17,7 @@ itertools = __import__('itertools')
 # Configuration
 # ==============================================================================
 GROUP_SIZE = 4
-MAX_ATTEMPTS_PER_WEEK = 10000
+MAX_ATTEMPTS_PER_WEEK = 100000
 
 # ==============================================================================
 # Core Scheduling Logic (Must be defined BEFORE UI calls them)
