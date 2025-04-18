@@ -20,125 +20,80 @@ MAX_ATTEMPTS_PER_WEEK = 3000
 # Core Scheduling Logic (Must be defined BEFORE UI calls them)
 # ==============================================================================
 
-def check_group_uniqueness(group, past_groups_by_player):
-    """Checks if this exact group (frozenset) is new for ALL members."""
-    # Convert group to frozenset for hashable comparison
-    group_fset = frozenset(group)
-    for player in group:
-        # Check if player exists in history and if the group is in their history
-        if player in past_groups_by_player and group_fset in past_groups_by_player[player]:
-            return False # Found a repeat for this player
-    return True # Group is unique for all members found in history
+def check_pair_uniqueness(group, past_pairs):
+    """Return True if every 2-player combination in group is new."""
+    for a, b in itertools.combinations(group, 2):
+        if frozenset((a, b)) in past_pairs:
+            return False
+    return True
 
-def generate_weekly_groups(available_golfers_names, past_groups_by_player, num_groups_per_week, group_size):
+def generate_weekly_groups(available_golfers_names, past_pairs, num_groups_per_week, group_size):
     """Tries to generate unique groups for the week using randomization."""
     attempts = 0
     num_golfers = len(available_golfers_names)
 
     while attempts < MAX_ATTEMPTS_PER_WEEK:
         attempts += 1
-        remaining_golfers = list(available_golfers_names)
-        random.shuffle(remaining_golfers)
-        current_week_groups = []
-        possible = True
+        remaining = list(available_golfers_names)
+        random.shuffle(remaining)
 
-        if num_golfers < group_size :
-             # Should be caught by earlier validation, but good failsafe
-             # Return None signifies failure to generate
-             return None
+        week_groups = []
+        formed_groups = 0
+        idx = 0
+        tmp_pairs = past_pairs.copy()
 
-        index = 0
-        groups_formed_this_attempt = 0
-        temp_past_groups_for_check = {p: past_groups_by_player.get(p, set()).copy() for p in available_golfers_names}
+        while formed_groups < num_groups_per_week and idx + group_size <= num_golfers:
+            candidate = remaining[idx: idx + group_size]
 
-        while groups_formed_this_attempt < num_groups_per_week and index + group_size <= len(remaining_golfers):
-            potential_group_list = remaining_golfers[index : index + group_size]
-            # Check uniqueness against the main history AND groups formed earlier *in this attempt*
-            if check_group_uniqueness(potential_group_list, temp_past_groups_for_check):
-                current_week_groups.append(tuple(sorted(potential_group_list)))
-                groups_formed_this_attempt += 1
-                # Update temp history for subsequent checks within this attempt
-                group_fset = frozenset(potential_group_list)
-                for player in potential_group_list:
-                    if player in temp_past_groups_for_check:
-                         temp_past_groups_for_check[player].add(group_fset)
-                    # else: should not happen if available_golfers_names is correct
-            # Move index regardless of success to try next segment in shuffle
-            index += group_size
+            if check_pair_uniqueness(candidate, tmp_pairs):
+                week_groups.append(tuple(sorted(candidate)))
+                formed_groups += 1
+                for a, b in itertools.combinations(candidate, 2):
+                    tmp_pairs.add(frozenset((a, b)))
 
-        # Check if we formed the required number of groups in this attempt
-        if len(current_week_groups) == num_groups_per_week:
-            return current_week_groups # Success for this week
+            idx += group_size
 
-        # If loop finishes without forming enough groups, the outer while loop continues (new shuffle)
+        if formed_groups == num_groups_per_week:
+            past_pairs.update(tmp_pairs)
+            return week_groups
 
-    # Failed after max attempts for the week
-    return None # Signifies failure for this week
-
+    return None
 
 def create_schedule(golfer_list, num_weeks, group_size):
-    """
-    Main function to generate the schedule.
-    Returns tuple: (schedule_list_or_None, status_message)
-    """
     if not golfer_list:
         return None, "Error: Golfer list is empty."
 
     num_golfers = len(golfer_list)
     if num_golfers % group_size != 0:
-         return None, f"Error: Number of included players ({num_golfers}) must be divisible by group size ({group_size})."
+        return None, f"Error: Number of included players ({num_golfers}) must be divisible by group size ({group_size})."
     num_groups_per_week = num_golfers // group_size
 
-    # Initialize history for players being scheduled
-    past_groups_by_player = {player: set() for player in golfer_list}
-    weekly_schedule = [] # List to hold lists of group tuples for each week
-
-    print(f"Attempting generation for {num_weeks} weeks...") # Debug print
+    past_pairs = set()
+    weekly_schedule = []
 
     for week_num in range(1, num_weeks + 1):
-        print(f"Generating Week {week_num}/{num_weeks}...") # Debug print
-
         new_week_groups = generate_weekly_groups(
             golfer_list,
-            past_groups_by_player, # Pass the cumulative history
+            past_pairs,
             num_groups_per_week,
             group_size
         )
 
         if new_week_groups is None:
-            # Generation failed for this week
             failure_msg = (
                 f"Error: Could not generate a valid unique grouping for Week {week_num} "
                 f"after {MAX_ATTEMPTS_PER_WEEK} attempts.\n\n"
-                f"This can happen if the constraints are too strict (especially for many weeks) "
-                f"or due to the randomized nature of the search.\n\n"
+                f"This can happen if the constraints are too strict or due to the randomized nature of the search.\n\n"
                 f"Suggestions:\n"
-                f"- Try generating again (might find a solution next time).\n"
+                f"- Try generating again.\n"
                 f"- Reduce the number of weeks.\n"
                 f"- Check if the input golfer list is correct."
             )
-            # Return partial schedule found so far and the error message
             return weekly_schedule, failure_msg
 
-        # Success for this week, add to schedule and update history
         weekly_schedule.append(new_week_groups)
 
-        # Update past groups history using the newly formed groups
-        for group_tuple in new_week_groups:
-            group_fset = frozenset(group_tuple)
-            for player in group_fset:
-                # Ensure player exists in dict (should always be true here)
-                if player in past_groups_by_player:
-                     past_groups_by_player[player].add(group_fset)
-                else:
-                     # This case shouldn't happen if golfer_list is correct
-                     print(f"Internal Warning: Player {player} from generated group {group_fset} not found in history dict.")
-
-
-    # If loop completes successfully for all weeks
-    success_msg = f"Successfully generated schedule for all {num_weeks} weeks!"
-    return weekly_schedule, success_msg
-
+    return weekly_schedule, f"Successfully generated schedule for all {num_weeks} weeks!"
 
 # ==============================================================================
 # Streamlit Specific Helper Functions (Defined before UI calls them)
