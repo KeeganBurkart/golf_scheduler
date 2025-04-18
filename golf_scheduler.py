@@ -7,13 +7,16 @@ import streamlit as st
 import pandas as pd
 import random
 import io
+import builtins as safe_builtin_imports
 from pathlib import Path
+
+# fallback to safe import in case itertools was shadowed
+itertools = __import__('itertools')
 
 # ==============================================================================
 # Configuration
 # ==============================================================================
 GROUP_SIZE = 4
-# NOTE: Very high attempts might make the web app slow/timeout on free hosting.
 MAX_ATTEMPTS_PER_WEEK = 3000
 
 # ==============================================================================
