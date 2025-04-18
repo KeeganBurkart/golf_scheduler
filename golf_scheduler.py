@@ -1,102 +1,92 @@
 # -*- coding: utf-8 -*-
 """
 Streamlit Web App for Golf Group Scheduling with Player Management.
+Improved Social‑Golfer solver: exact backtracking per week (pair‑wise uniqueness).
 """
 
 import streamlit as st
 import pandas as pd
 import random
 import io
-import builtins as safe_builtin_imports
+import itertools
 from pathlib import Path
-
-# fallback to safe import in case itertools was shadowed
-itertools = __import__('itertools')
 
 # ==============================================================================
 # Configuration
 # ==============================================================================
 GROUP_SIZE = 4
-MAX_ATTEMPTS_PER_WEEK = 100000
 
 # ==============================================================================
-# Core Scheduling Logic (Must be defined BEFORE UI calls them)
+# Core Scheduling Logic – pair‑wise backtracking
 # ==============================================================================
 
-def check_pair_uniqueness(group, past_pairs):
-    """Return True if every 2-player combination in group is new."""
-    for a, b in itertools.combinations(group, 2):
-        if frozenset((a, b)) in past_pairs:
-            return False
-    return True
+def pairs_of(group):
+    """Return frozensets for all 2‑player combos in *group*."""
+    return [frozenset(p) for p in itertools.combinations(group, 2)]
 
-def generate_weekly_groups(available_golfers_names, past_pairs, num_groups_per_week, group_size):
-    """Tries to generate unique groups for the week using randomization."""
-    attempts = 0
-    num_golfers = len(available_golfers_names)
 
-    while attempts < MAX_ATTEMPTS_PER_WEEK:
-        attempts += 1
-        remaining = list(available_golfers_names)
-        random.shuffle(remaining)
+def build_week(remaining, group_size, past_pairs, groups_acc):
+    """Recursive helper – builds one week's groups or returns None (fail)."""
+    if not remaining:
+        return groups_acc  # success
 
-        week_groups = []
-        formed_groups = 0
-        idx = 0
-        tmp_pairs = past_pairs.copy()
+    first = remaining[0]
+    # Choose partners for *first*
+    for partners in itertools.combinations(remaining[1:], group_size - 1):
+        group = (first, *partners)
+        # Check pairwise uniqueness
+        if any(p in past_pairs for p in pairs_of(group)):
+            continue
 
-        while formed_groups < num_groups_per_week and idx + group_size <= num_golfers:
-            candidate = remaining[idx: idx + group_size]
+        # Commit this group
+        new_pairs = pairs_of(group)
+        past_pairs.update(new_pairs)
+        next_remaining = [p for p in remaining if p not in group]
 
-            if check_pair_uniqueness(candidate, tmp_pairs):
-                week_groups.append(tuple(sorted(candidate)))
-                formed_groups += 1
-                for a, b in itertools.combinations(candidate, 2):
-                    tmp_pairs.add(frozenset((a, b)))
+        result = build_week(next_remaining, group_size, past_pairs, groups_acc + [tuple(sorted(group))])
+        if result is not None:
+            return result  # found a full week
 
-            idx += group_size
+        # Backtrack
+        for p in new_pairs:
+            past_pairs.remove(p)
 
-        if formed_groups == num_groups_per_week:
-            past_pairs.update(tmp_pairs)
-            return week_groups
+    return None  # dead end
 
-    return None
+
+def generate_weekly_groups_bt(player_list, past_pairs, group_size):
+    """Generate one week's schedule using recursive backtracking (exact)."""
+    players = sorted(player_list)
+    random.shuffle(players)  # randomise starting order for variety
+    return build_week(players, group_size, past_pairs, [])
+
 
 def create_schedule(golfer_list, num_weeks, group_size):
+    """Create full schedule. Returns (schedule, message)."""
     if not golfer_list:
         return None, "Error: Golfer list is empty."
 
-    num_golfers = len(golfer_list)
-    if num_golfers % group_size != 0:
-        return None, f"Error: Number of included players ({num_golfers}) must be divisible by group size ({group_size})."
-    num_groups_per_week = num_golfers // group_size
+    if len(golfer_list) % group_size != 0:
+        return None, (
+            f"Error: Number of included players ("f"{len(golfer_list)}) must be divisible by group size ("f"{group_size}).")
+
+    theoretical_max = (len(golfer_list) - 1) // (group_size - 1)
+    if num_weeks > theoretical_max:
+        return None, (
+            f"Impossible: With {len(golfer_list)} players you can have at most {theoretical_max} unique weeks.")
 
     past_pairs = set()
-    weekly_schedule = []
+    schedule = []
 
-    for week_num in range(1, num_weeks + 1):
-        new_week_groups = generate_weekly_groups(
-            golfer_list,
-            past_pairs,
-            num_groups_per_week,
-            group_size
-        )
+    for week in range(1, num_weeks + 1):
+        week_groups = generate_weekly_groups_bt(golfer_list, past_pairs, group_size)
+        if week_groups is None:
+            return schedule, (
+                f"Error: Could not find a valid arrangement for Week {week}. "
+                "Try reducing weeks or shuffling players.")
+        schedule.append(week_groups)
 
-        if new_week_groups is None:
-            failure_msg = (
-                f"Error: Could not generate a valid unique grouping for Week {week_num} "
-                f"after {MAX_ATTEMPTS_PER_WEEK} attempts.\n\n"
-                f"This can happen if the constraints are too strict or due to the randomized nature of the search.\n\n"
-                f"Suggestions:\n"
-                f"- Try generating again.\n"
-                f"- Reduce the number of weeks.\n"
-                f"- Check if the input golfer list is correct."
-            )
-            return weekly_schedule, failure_msg
-
-        weekly_schedule.append(new_week_groups)
-
-    return weekly_schedule, f"Successfully generated schedule for all {num_weeks} weeks!"
+    return schedule, f"Successfully generated schedule for all {num_weeks} weeks!"
 
 # ==============================================================================
 # Streamlit Specific Helper Functions (Defined before UI calls them)
